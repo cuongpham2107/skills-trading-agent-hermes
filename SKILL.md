@@ -1,7 +1,7 @@
 ---
 name: dnse-stock-analysis
 description: "Use when user asks to analyze/evaluate Vietnamese stocks. Fundamental-first 7-step pipeline: P/E, ROE, revenue → Investment Thesis. Portfolio tracking + journal."
-version: 3.1.0
+version: 3.2.0
 author: Hermes + Cuong
 platforms: [macos, linux]
 metadata:
@@ -88,9 +88,18 @@ User hỏi gì?
 ~/.hermes/skills/finance/dnse-stock-analysis/
 ├── SKILL.md
 ├── scripts/
-│   ├── dnse_fetch.py          # Fetch OHLC, quotes, secDef, NĐTNN từ DNSE API
-│   ├── fundamentals_fetch.py  # Fetch P/E, P/B, ROE, KQKD, company info từ vnstock
-│   └── portfolio.py           # Quản lý SQLite portfolio + journal
+│   ├── data_lock.py              # Step 1: Khóa dữ liệu đầu vào (DNSE + vnstock) + data_status
+│   ├── dnse_fetch.py             # Fetch OHLC, quotes, secDef, NĐTNN từ DNSE API
+│   ├── fundamentals_fetch.py     # Fetch P/E, P/B, ROE, KQKD, company info từ vnstock
+│   ├── technical_compute.py      # Step 1b: Tính toán chỉ báo kỹ thuật (LLM chỉ diễn giải)
+│   ├── knowledge_query.py        # Step 3b: Tra cứu kiến thức vĩ mô/ngành (RAG nhẹ)
+│   ├── screener.py               # Screening danh sách mã
+│   └── portfolio.py              # Quản lý SQLite portfolio + journal
+├── knowledge/                    # RAG knowledge base (mức nhẹ: front-matter + _index.md)
+│   ├── _index.md                 # Mục lục + từ khóa → router
+│   ├── macro/                    # Kiến thức vĩ mô VN
+│   ├── sector-frameworks/        # Khung phân tích theo ngành
+│   └── historical-cases/         # Case study lịch sử thị trường
 ├── references/
 │   ├── dnse-api-auth.md
 │   ├── dnse-auth-debug.md
@@ -98,10 +107,11 @@ User hỏi gì?
 │   └── vnstock-v4-api-quickref.md
 ├── data/
 │   ├── trading.db
-│   └── symbols_by_industries.csv
+│   ├── symbols_by_industries.csv
+│   └── .lock_{TICKER}.json       # Data lock files (auto-generated)
 ├── journal/
 │   └── YYYY-MM-DD_TICKER.md
-└── .venv/                     # Python 3.14 + vnstock 4.0.5
+└── .venv/                        # Python 3.14 + vnstock 4.0.5
 ```
 
 ## Database Schema
@@ -138,261 +148,136 @@ CREATE TABLE IF NOT EXISTS outcome_review (
 
 ---
 
-## PIPELINE 7 BƯỚC
+## PIPELINE 8 BƯỚC (v3.2)
 
-### Step 1: FETCH DATA (song song — 2 scripts)
+### ⛓️ NGUYÊN TẮC CHỐNG BỊA DỮ LIỆU (áp dụng toàn pipeline)
+
+1. **Data Lock**: Sau Step 1, mọi dữ liệu đầu vào bị KHÓA CỨNG trong file `.lock_{TICKER}.json`.
+2. **Cấm tuyệt đối** điền số vào field có `"data_status": "missing"` hoặc `"error"` — chỉ được viết "không có dữ liệu".
+3. **Mọi con số hiển thị** (P/E, ROE, RSI, target price...) PHẢI do script Python tính — LLM chỉ diễn giải ý nghĩa.
+4. **Hậu kiểm (post-validation)**: Sau Step 8, quét Investment Thesis, đối chiếu từng con số với Data Lock — số nào không khớp/không có nguồn → gắn cảnh báo.
+
+### Step 0: DATA LOCK — khóa dữ liệu đầu vào
 
 ```bash
-# Script 1: Dữ liệu thị trường DNSE (OHLC, giá, bid/ask, NĐTNN, secDef)
-PYTHONPATH="" .venv/bin/python3 scripts/dnse_fetch.py {TICKER}
-
-# Script 2: Dữ liệu tài chính vnstock (P/E, P/B, ROE, ROA, KQKD, company info)
-PYTHONPATH="" .venv/bin/python3 scripts/fundamentals_fetch.py {TICKER}
+PYTHONPATH="" .venv/bin/python3 scripts/data_lock.py {TICKER}
 ```
 
-**Output từ `dnse_fetch.py`:** closePrice, ohlcHistory (65D), latestTrades, latestQuotes, foreignTrading, secDef, instruments.
+Script chạy `dnse_fetch.py` + `fundamentals_fetch.py`, gộp vào 1 JSON với `data_status` cho từng nhóm chỉ số.
 
-**Output từ `fundamentals_fetch.py`:** company (tên, sàn, CEO, vốn điều lệ, business model), metrics (P/E, P/B, ROE, ROA, EPS, BVPS, Gross Margin, Net Margin, D/E, Interest Coverage, Dividend Yield...), income_yearly (Revenue, Net Profit 4 năm gần nhất), income_quarterly (QoQ growth).
+**Output:** `data/.lock_{TICKER}.json` chứa:
+- `price` (close, open, high, low, ceiling, floor) + data_status
+- `ohlc_history` (65 ngày) + data_status
+- `orderbook` (bids, offers, volume) + data_status
+- `foreign_trading` + data_status
+- `secdef` (basic_price, ceiling, floor, exchange, indexes)
+- `fundamentals` (metrics, income_yearly, income_quarterly, company) + data_status
+- `meta.overall_data_quality`: "full" | "partial" | "none"
 
-> ⚠️ Nếu fundamentals_fetch.py lỗi → ghi chú "Không có dữ liệu tài chính (vnstock lỗi)", pipeline vẫn tiếp tục với dữ liệu DNSE.
+> ⚠️ Nếu `overall_data_quality = "none"` → pipeline không tiếp tục. Báo user: "Không có đủ dữ liệu để phân tích {TICKER}."
+
+### Step 1: TECHNICAL COMPUTE — tính toán chỉ báo bằng code
+
+```bash
+PYTHONPATH="" .venv/bin/python3 scripts/technical_compute.py --ticker {TICKER}
+```
+
+Script đọc OHLC từ Data Lock, tính TOÀN BỘ chỉ báo kỹ thuật bằng Python:
+
+**Output JSON:** `trend` (SMA20, SMA50, EMA20, price vs 20D high/low), `momentum` (RSI14, MACD, ADX), `volatility` (ATR14, Bollinger Bands), `support_resistance` (swing points), `volume` (avg20d, avg5d, up/down ratio), `change` (1D, 5D, 20D, from peak/trough).
+
+> LLM Technical Analyst CHỈ được diễn giải các con số này — KHÔNG được tự tính, tự làm tròn, hoặc bịa chỉ báo.
 
 ### Step 2: NEWS + SENTIMENT (2 agents song song)
 
 **News Agent** — "Chuyện gì vừa xảy ra với {TICKER}?"
 
-Search Google News RSS: `news.google.com/rss/search?q={TICKER}+kết+quả+kinh+doanh+OR+cổ+tức+OR+hợp+đồng&hl=vi&gl=VN&ceid=VN:vi`
-
-Output JSON:
-```json
-{
-  "keyEvents": [{"event": "...", "date": "...", "impact": "+/-/neutral", "source": "..."}],
-  "recentNews": [{"title": "...", "date": "...", "relevance": "high/medium/low"}],
-  "pendingCatalysts": ["KQKD Q2", "ĐHCĐ", "chia cổ tức"...],
-  "summary": "Tóm tắt 2-3 câu"
-}
-```
+Search Google News RSS. Output JSON: `{keyEvents[], recentNews[], pendingCatalysts[], summary}`
 
 **Sentiment Agent** — "Mọi người nghĩ gì về {TICKER}?"
 
-Dựa trên: News Agent output + price action + volume + kiến thức thị trường.
+Output JSON: `{retailSentiment, institutionalSentiment, narrativeStrength, divergenceFlag, summary}`
 
-Output JSON:
-```json
-{
-  "retailSentiment": {"score": -5 to 5, "label": "HOẢNG LOẠN / LẠC QUAN / TRUNG LẬP", "indicators": ["volume pattern", "price action"]},
-  "institutionalSentiment": {"score": -5 to 5, "label": "MUA RÒNG / BÁN RÒNG / ĐỨNG NGOÀI", "indicators": ["NĐTNN", "ETF flow"]},
-  "narrativeStrength": {"score": 1-10, "verdict": "MẠNH / SUY YẾU / BỊ THỬ THÁCH"},
-  "divergenceFlag": {"present": true/false, "type": "bullish/bearish divergence", "note": "..."},
-  "summary": "Tóm tắt 2-3 câu"
-}
-```
-
-> ⚠️ News search thường bị chặn CAPTCHA. Dùng Google News RSS làm nguồn chính. Nếu không có kết quả → ghi "Không có sự kiện đáng kể trong 7 ngày" và suy luận sentiment từ price action + volume.
+> ⚠️ Bắt buộc tách 2 loại output: `sentiment_from_news` (có tin thật) và `sentiment_inferred_from_price` (suy luận khi không có tin). Trong Investment Thesis, phần suy luận phải gắn nhãn: "⚠️ Suy luận từ price action (không có tin xác nhận)".
 
 ### Step 3: FUNDAMENTAL + MACRO + VN-SPECIFIC (3 agents song song)
 
-Đây là BƯỚC QUAN TRỌNG NHẤT — quyết định CÓ MUA KHÔNG.
+**3a. Fundamental Analyst** — input: Data Lock fundamentals section. Trả JSON: `{growthAnalysis, qualityAnalysis, valuationAnalysis, redFlags[], overallScore, summary}`
 
-**3a. Fundamental Analyst (DOANH NGHIỆP CÓ TỐT KHÔNG?)**
+**3b. Macro Analyst với RAG** — trước khi chạy prompt, fetch kiến thức từ knowledge base:
 
-```
-Bạn là Fundamental Analyst. Phân tích {TICKER} dựa trên dữ liệu tài chính THỰC.
-
-Dữ liệu từ vnstock:
-- P/E: {PE} | P/B: {PB} | ROE: {ROE}% | ROA: {ROA}%
-- EPS: {EPS} | BVPS: {BVPS}
-- Gross Margin: {GM}% | Net Margin: {NM}%
-- D/E: {DE}% | Interest Coverage: {IC}
-- Revenue 4 năm: {REVENUE_YEARLY}
-- Net Profit 4 năm: {PROFIT_YEARLY}
-- QoQ growth: Revenue {REV_QOQ}%, Profit {PROFIT_QOQ}%
-
-Đánh giá 5 nhóm:
-1. TĂNG TRƯỞNG: Revenue/Profit growth YoY, QoQ
-2. CHẤT LƯỢNG: ROE, ROA, Gross Margin, Net Margin — so với ngành
-3. ĐỊNH GIÁ: P/E, P/B — đắt/rẻ so với lịch sử và ngành?
-4. NỢ & DÒNG TIỀN: D/E, Interest Coverage — an toàn không?
-5. ĐIỂM YẾU: rủi ro gì từ báo cáo tài chính?
-
-QUAN TRỌNG: So sánh với TRUNG BÌNH NGÀNH. Ví dụ:
-- Ngân hàng: P/B 1.0-2.0 là bình thường, ROE 15%+ là tốt
-- Công nghệ: P/E 15-25, ROE 20%+, D/E <50%
-- Dệt may: P/E 8-12, biên LN thấp (5-10%)
-
-Trả JSON: {growthAnalysis, qualityAnalysis, valuationAnalysis, debtAnalysis, redFlags[], overallScore (1-10), comparisonWithIndustry, summary}
+```bash
+PYTHONPATH="" .venv/bin/python3 scripts/knowledge_query.py --ticker {TICKER} --query "lãi suất tín dụng ngành"
 ```
 
-**3b. Macro Analyst (VĨ MÔ ẢNH HƯỞNG THẾ NÀO?)**
+Output trả về đoạn trích + nguồn → inject vào prompt:
 
 ```
-Bạn là Macro Analyst. Đánh giá yếu tố vĩ mô ảnh hưởng đến {TICKER}.
-
-CHỈ phân tích nếu LIÊN QUAN TRỰC TIẾP. Dựa trên ngành của ticker:
-- Ngân hàng: lãi suất NHNN, tăng trưởng tín dụng, nợ xấu toàn ngành, chính sách tiền tệ
-- BĐS: lãi suất, pháp lý dự án, đầu tư công, tín dụng BĐS
-- Công nghệ: chi tiêu CNTT toàn cầu, tỷ giá USD/VND, xu hướng AI
-- Dệt may: đơn hàng xuất khẩu, tỷ giá, cầu tiêu dùng toàn cầu
-- Thép: giá thép thế giới, đầu tư công, BĐS
-
-Trả JSON: {macroFactors[], interestRate, exchangeRate, industryTrend, relevantPolicies[], summary}
+THAM KHẢO (có nguồn, không phải tự nhớ):
+[Nguồn: sector-frameworks/banking.md] "..."
 ```
 
-**3c. VN-Specific Analyst (YẾU TỐ ĐẶC THÙ VIỆT NAM)**
+**Luật RAG:** Chỉ diễn giải từ đoạn trích. Nếu không có đoạn nào → ghi "Không có tài liệu tham khảo phù hợp trong knowledge base". Mọi câu dùng RAG phải trace về file nguồn.
 
-```
-Bạn là VN-Specific Analyst. Đánh giá yếu tố đặc thù thị trường Việt Nam cho {TICKER}.
-
-Phân tích 5 yếu tố:
-1. NĐTNN: Dữ liệu foreignTrading từ DNSE. Mua/bán ròng? Room ngoại còn bao nhiêu?
-2. CỔ TỨC & CORPORATE ACTIONS: Dividend yield? Lịch sử chia cổ tức? ESOP? Phát hành thêm?
-3. SECTOR ROTATION: Ngành này đang ở đâu trong chu kỳ? Dòng tiền đang vào hay ra?
-4. KHỐI TỰ DOANH: Các CTCK đang mua hay bán? (suy luận từ volume pattern nếu không có data)
-5. THANH KHOẢN: Volume TB, giá trị giao dịch, spread bid/ask
-
-Trả JSON: {foreignFlow, corporateActions, sectorRotation, liquidityAnalysis, summary}
-```
+**3c. VN-Specific Analyst** — input: Data Lock foreign_trading + orderbook + secdef. Trả JSON: `{foreignFlow, corporateActions, sectorRotation, liquidityAnalysis, summary}`
 
 ### Step 4: BULL / BEAR DEBATE (2 agents song song)
 
-**Bull Researcher:** Tìm mọi lý do nên MUA, dùng evidence từ Step 3.
-**Bear Researcher:** Tìm mọi lý do KHÔNG nên mua, dùng evidence từ Step 3.
-
 Mỗi agent trả JSON: `{argument, evidence[], confidence, summary}`
 
-> Bỏ Round 2 phản biện (v2 có) — không cần thiết, tốn thời gian, không cải thiện chất lượng.
+### Step 5: JUDGE + RESEARCH MANAGER (2 bước tách biệt)
 
-### Step 5: RESEARCH MANAGER (trọng tài)
+**5a. Judge** — chỉ phân xử Bull vs Bear: bên nào có luận điểm mạnh hơn dựa TRÊN BẰNG CHỨNG TỪ DATA LOCK. Trả JSON: `{winner, reasoning, bull_strengths[], bear_strengths[]}`
 
-```
-Bạn là Research Manager. Dựa trên toàn bộ phân tích (Fundamental + Macro + VN-Specific + Bull/Bear Debate), đưa RATING:
+**5b. Research Manager** — input: Judge verdict + toàn bộ data. Ra RATING (BUY/OVERWEIGHT/HOLD/UNDERWEIGHT/SELL) với ràng buộc:
 
-- BUY: doanh nghiệp TỐT + định giá HẤP DẪN + sentiment TÍCH CỰC
-- OVERWEIGHT: doanh nghiệp tốt + định giá hợp lý + tăng tỷ trọng nếu đang nắm giữ
-- HOLD: doanh nghiệp tốt nhưng định giá chưa đủ hấp dẫn HOẶC kỹ thuật xấu
-- UNDERWEIGHT: doanh nghiệp khá nhưng rủi ro ngắn hạn cao → giảm tỷ trọng
-- SELL: doanh nghiệp XẤU hoặc định giá QUÁ ĐẮT hoặc rủi ro QUÁ CAO
-
-Trả JSON: {decision, rating, confidence (0-1), reasoning, bullSummary, bearSummary, keyFactors[{factor, assessment, detail}]}
-```
+- Nếu `fundamentals.data_status = "missing"` → rating tối đa HOLD
+- Nếu Fundamental tốt nhưng Technical xấu → rating tối đa HOLD
+- Confidence dùng rubric 3 mức: Thấp / Trung bình / Cao (theo tiêu chí: độ đầy đủ dữ liệu, có tin xác nhận, độ đồng thuận Bull/Bear)
+- Ghi rõ trong output: "Confidence là ước lượng định tính, không phải xác suất thống kê từ backtest."
 
 ### Step 6: TECHNICAL + RISK + TRADER (3 agents song song)
 
-**Technical Analyst — CHỈ ĐỂ TIMING. KHÔNG QUYẾT ĐỊNH MUA/BÁN.**
+**Technical Analyst** — input: Technical Compute JSON. CHỈ diễn giải, không tính toán.
 
-```
-Bạn là Technical Analyst. Phân tích kỹ thuật {TICKER} để tìm ĐIỂM VÀO TỐI ƯU.
+**Risk Analyst** — đánh giá 6 loại rủi ro. Hard-cap position size: **tối đa 20%/mã** (code-level, không phụ thuộc agent).
 
-LƯU Ý: Bạn KHÔNG quyết định mua hay bán. Fundamental đã quyết định điều đó.
-Bạn chỉ tìm timing: khi nào vào? giá nào?
-
-Phân tích: trend, SMA(20,50), RSI, MACD, volume, hỗ trợ/kháng cự, Bollinger Bands.
-
-Trả JSON: {trend, supportLevels[], resistanceLevels[], indicators{rsi, macd, volume}, optimalEntry{zones[], confirmationSignals[]}, stopLossLevel, summary}
-```
-
-**Risk Analyst — Đánh giá MẤT GÌ NẾU SAI?**
-
-```
-Bạn là Risk Analyst. Đánh giá toàn diện rủi ro cho {TICKER}.
-
-1. Market Risk: mất support → rủi ro giảm bao nhiêu %?
-2. Technical Risk: volume, divergence, fake breakout?
-3. Fundamental Risk: định giá có bị nén không? KQKD có rủi ro miss?
-4. Macro Risk: tỷ giá, lãi suất, chính sách
-5. Liquidity Risk: có thoát được hàng không?
-6. Sentiment Risk: panic selling, narrative shift
-
-Mỗi loại: severity (CAO/TRUNG BÌNH/THẤP), probability (%), impact (%), mitigation.
-+ Position sizing: nên phân bổ bao nhiêu % danh mục?
-+ Max drawdown dự kiến?
-
-Trả JSON: {risks[{type, severity, probability, impact, mitigation}], overallRiskScore (1-10), suggestedPositionSize, maxDrawdownEstimate, summary}
-```
-
-**Trader — Kế hoạch giao dịch cụ thể**
-
-```
-Bạn là Trader. Dựa trên rating từ Research Manager + timing từ Technical + risk từ Risk Analyst.
-
-Đưa kế hoạch giao dịch CỤ THỂ:
-- action: buy/sell/hold/accumulate
-- entryPoint: giá vào (hoặc vùng vào)
-- entryStrategy: lump sum hay DCA? mấy lần?
-- targetPrice: giá mục tiêu (1-3 mức)
-- stopLoss: cắt lỗ cứng
-- positionSize: % danh mục
-- timeframe: ngắn hạn (<1 tháng) / trung hạn (1-6 tháng) / dài hạn (>6 tháng)
-- exitStrategy: trailing stop? chốt từng phần?
-- riskRewardRatio
-
-Trả JSON: {action, ticker, entryPoint, entryStrategy, targetPrice[], stopLoss, positionSize, timeframe, exitStrategy, riskRewardRatio, confidence, reasoning}
-```
-
-### Step 7: PORTFOLIO MANAGER — Investment Thesis + LƯU KẾT LUẬN
-
-Main agent tự tổng hợp TOÀN BỘ pipeline thành Investment Thesis. Format bắt buộc:
-
-```
-📊 **LUẬN ĐIỂM ĐẦU TƯ — {TICKER} | {DATE}**
-
-🏢 **DOANH NGHIỆP**
-- Tên: {NAME} | Sàn: {EXCHANGE} | Ngành: {INDUSTRY}
-- Vốn hóa: ~{MARKET_CAP} tỷ | CEO: {CEO}
-
-💰 **SỨC KHỎE TÀI CHÍNH**
-- P/E: {PE} (ngành: {INDUSTRY_PE}) | P/B: {PB} (ngành: {INDUSTRY_PB})
-- ROE: {ROE}% | ROA: {ROA}% | EPS: {EPS}
-- Gross Margin: {GM}% | Net Margin: {NM}%
-- D/E: {DE}% | Interest Coverage: {IC}x
-- Revenue {LATEST_YEAR}: {REVENUE} tỷ | Net Profit: {PROFIT} tỷ
-- Tăng trưởng lợi nhuận YoY: {PROFIT_GROWTH}% | QoQ: {PROFIT_QOQ}%
-
-📰 **SỰ KIỆN & TÂM LÝ**
-- Sự kiện: [tóm tắt từ News Agent]
-- Sentiment: {SENTIMENT_LABEL} ({SENTIMENT_SCORE}/10)
-
-⚖️ **LUẬN ĐIỂM**
-- ✅ BULL: [2-3 ý chính từ Bull Researcher]
-- ❌ BEAR: [2-3 ý chính từ Bear Researcher]
-
-📈 **KỸ THUẬT** (timing)
-- Giá: {CLOSE_PRICE} | Trend: {TREND}
-- Hỗ trợ: {SUPPORTS} | Kháng cự: {RESISTANCES}
-- Volume: {VOLUME_ANALYSIS}
-
-🛡️ **RỦI RO**
-- Overall Risk: {RISK_SCORE}/10
-- Rủi ro lớn nhất: {TOP_RISKS}
-- Max Drawdown dự kiến: {MAX_DD}%
-
-🎯 **KHUYẾN NGHỊ**
-- Rating: {RATING} | Confidence: {CONFIDENCE}%
-- Hành động: {ACTION}
-- Vào: {ENTRY} | Mục tiêu: {TARGET} | Cắt lỗ: {STOP_LOSS}
-- Tỷ trọng: {POSITION_SIZE}% danh mục
-- Timeframe: {TIMEFRAME}
-- Risk/Reward: {R_R}
-
-📝 **LUẬN ĐIỂM ĐẦU TƯ**
-[3-4 câu — tại sao nên/không nên đầu tư vào {TICKER} ở mức giá này?]
-
-⚠️ **LƯU Ý**
-- Đây là phân tích tham khảo, KHÔNG phải lời khuyên tài chính
-- Luôn có kế hoạch cắt lỗ. Không dùng đòn bẩy nếu chưa có kinh nghiệm.
-```
-
-**SAU KHI hiển thị, LƯU NGAY vào database:**
-
+Trước khi đề xuất, PHẢI đọc portfolio từ SQLite ngay tại thời điểm đó:
 ```bash
-PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py log_analysis \
-    --ticker {TICKER} --date {DATE} --close-price {CLOSE_PRICE} \
-    --rating "{RATING}" --action {ACTION} --target-price {TARGET} \
-    --stop-loss {STOP_LOSS} --confidence {CONFIDENCE} \
-    --bull-case "{BULL_SUMMARY}" --bear-case "{BEAR_SUMMARY}" \
-    --key-news '{KEY_NEWS_JSON}' --recommendation "{THESIS_SHORT}"
+PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py status
 ```
 
-Đồng thời lưu markdown vào `journal/{DATE}_{TICKER}.md`.
+**Trader** — kế hoạch giao dịch: `{action, entryPoint, entryStrategy, targetPrice[], stopLoss, positionSize, timeframe, exitStrategy, riskRewardRatio}`
+
+**Cross-check TA:** Đối chiếu kết luận trend của Technical Analyst với dữ liệu giá 5 phiên gần nhất từ Data Lock. Nếu mâu thuẫn → gắn cờ cảnh báo.
+
+### Step 7: REFLECTION — học từ lịch sử (trước khi ra kết luận)
+
+Tự động đọc các lần phân tích trước của {TICKER} từ SQLite:
+```bash
+PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py review --ticker {TICKER} --days 90
+```
+
+Nếu có phân tích cũ → sinh đoạn "bài học":
+```
+BÀI HỌC TỪ LỊCH SỬ:
+- {DATE}: Rating BUY @{PRICE}, target {TARGET}. Sau 30 ngày: {ACTUAL} → {ĐÚNG/SAI}
+- ...
+```
+
+Inject vào prompt Portfolio Manager.
+
+### Step 8: PORTFOLIO MANAGER — Investment Thesis + Hậu kiểm + LƯU
+
+Main agent tổng hợp TOÀN BỘ pipeline thành Investment Thesis (format giữ nguyên như v3.1).
+
+**Hậu kiểm (post-validation) bắt buộc trước khi hiển thị:**
+- Quét từng con số trong Investment Thesis
+- Đối chiếu với Data Lock JSON
+- Số nào không khớp → gắn `⚠️ CẢNH BÁO: số liệu "{VALUE}" không có trong Data Lock. Cần kiểm tra lại.`
+- Số nào có data_status=missing → gạch ngang, ghi "không có dữ liệu"
+
+Sau khi hậu kiểm pass → hiển thị Investment Thesis → lưu DB + journal.
 
 ---
 
@@ -480,7 +365,13 @@ Chạy 15:30 mỗi ngày T2-T6: fetch giá đóng cửa → tính P&L → báo c
 
 ## Pitfalls
 
-- **fundamentals_fetch.py**: PHẢI chạy với `PYTHONPATH=""` và skill's `.venv/bin/python3`. Không dùng system Python (thiếu vnstock) hoặc vnstock-ai/.venv (sai path check). Script đã clear PYTHONPATH tự động từ bên trong.
+- **data_lock.py**: Chạy TRƯỚC mọi thứ khác. Nếu `overall_data_quality = "none"` → DỪNG pipeline, báo user. KHÔNG được chạy phân tích nếu không có lock file.
+- **technical_compute.py**: Tất cả chỉ báo kỹ thuật (RSI, MACD, ATR, BB, support/resistance) do script này tính. LLM Technical Analyst CHỈ diễn giải — CẤM tự tính chỉ báo.
+- **knowledge_query.py (RAG nhẹ)**: Đọc `knowledge/_index.md` → match tags/keywords → trả về top-3 file liên quan. Nếu không có match → báo "Không có tài liệu tham khảo phù hợp". CẤM agent tự bịa kiến thức vĩ mô.
+- **Anti-hallucination**: Mọi số trong Investment Thesis phải trace được về Data Lock hoặc Technical Compute. Hậu kiểm sau Step 8: số nào không khớp → gắn cảnh báo.
+- **Rating constraints**: Nếu `fundamentals.data_status = "missing"` → rating tối đa HOLD. Nếu Fundamental tốt nhưng Technical xấu → tối đa HOLD.
+- **Hard-cap position size**: Tối đa 20%/mã. Không agent nào được đề xuất vượt quá.
+- **Confidence rubric**: Chỉ dùng 3 mức Thấp/Trung bình/Cao. Ghi rõ: "ước lượng định tính, không phải xác suất thống kê".
 - **vnstock ad banner**: Script in ra quảng cáo vnstock insiders program ra stdout. Đây là output của vnstock library, không phải lỗi. Parser JSON cần bỏ qua dòng text trước dấu `{` đầu tiên.
 - **vnstock free tier limits**: 20 req/phút, tối đa 4 kỳ báo cáo tài chính. Không thể xem data quá 4 quý gần nhất nếu dùng free. Nếu cần thêm → nâng cấp insiders program.
 - **DNSE API signing**: Query string MUST be stripped from signing path. Use `path.split("?")[0]`.
