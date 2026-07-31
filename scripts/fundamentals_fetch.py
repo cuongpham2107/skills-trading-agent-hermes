@@ -76,7 +76,7 @@ def extract_metrics(ratio_df):
     return m
 
 
-def extract_income(df):
+def extract_income(df, prefix="q"):
     """Extract key P&L items."""
     items = {}
     item_map = {
@@ -86,14 +86,15 @@ def extract_income(df):
         "profit_before_tax": "profit_before_tax",
         "net_profit": "net_profit",
     }
+    # Determine available columns
+    cols = [c for c in df.columns if c not in ("item", "item_id", "item_en", "unit")]
     for _, row in df.iterrows():
         iid = row.get("item_id", "")
         if iid in item_map:
-            for col in ["2026-Q2", "2026-Q1"]:
-                if col in df.columns:
-                    val = safe_get(row, col)
-                    if val is not None:
-                        items[f"{item_map[iid]}_{col}"] = round(val, 0)
+            for col in cols[:4]:  # max 4 periods
+                val = safe_get(row, col)
+                if val is not None:
+                    items[f"{item_map[iid]}_{col}"] = round(val, 0)
 
     # Calculate QoQ growth
     if "revenue_2026-Q2" in items and "revenue_2026-Q1" in items and items["revenue_2026-Q1"] > 0:
@@ -175,14 +176,22 @@ def main():
     except Exception as e:
         result["metrics"] = {"error": str(e)}
 
-    # Income statement
+    # Income statement (yearly for trend analysis + quarterly for recent)
     try:
-        inc_df = fun.equity(ticker).income_statement(period="quarter")
-        result["income"] = extract_income(inc_df)
+        inc_df_year = fun.equity(ticker).income_statement(period="year")
+        result["income_yearly"] = extract_income(inc_df_year, prefix="year")
         if mode == "full":
-            result["raw_income"] = inc_df.to_dict(orient="records")[:15]
+            result["raw_income_yearly"] = inc_df_year.to_dict(orient="records")[:15]
     except Exception as e:
-        result["income"] = {"error": str(e)}
+        result["income_yearly"] = {"error": str(e)}
+
+    try:
+        inc_df_q = fun.equity(ticker).income_statement(period="quarter")
+        result["income_quarterly"] = extract_income(inc_df_q, prefix="q")
+        if mode == "full":
+            result["raw_income_quarterly"] = inc_df_q.to_dict(orient="records")[:15]
+    except Exception as e:
+        result["income_quarterly"] = {"error": str(e)}
 
     # Balance sheet (full mode only)
     if mode == "full":
