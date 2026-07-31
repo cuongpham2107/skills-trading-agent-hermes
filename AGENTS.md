@@ -53,8 +53,8 @@ Tất cả scripts dùng Python trong `.venv`:
 .venv/bin/pip install vnstock pandas requests
 
 # Chạy scripts (luôn dùng PYTHONPATH="")
-PYTHONPATH="" .venv/bin/python3 scripts/fetch_fundamentals.py FPT
-PYTHONPATH="" .venv/bin/python3 scripts/fetch_market.py FPT       # (dnse_fetch.py)
+PYTHONPATH="" .venv/bin/python3 scripts/fundamentals_fetch.py FPT
+PYTHONPATH="" .venv/bin/python3 scripts/dnse_fetch.py FPT
 PYTHONPATH="" .venv/bin/python3 scripts/screener.py VN30 --limit 10
 python3 scripts/portfolio.py status
 ```

@@ -16,6 +16,11 @@ for key in list(os.environ.keys()):
     if key == "PYTHONPATH":
         del os.environ[key]
 
+# Suppress vnstock's ad banner to stderr so stdout stays clean JSON
+import io
+_real_stdout = sys.stdout
+sys.stdout = io.StringIO()
+
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENV_DIR = os.path.join(SKILL_DIR, ".venv")
 
@@ -26,8 +31,12 @@ if sys.prefix != VENV_DIR and not sys.prefix.startswith(VENV_DIR):
 try:
     from vnstock import Fundamental, Reference
 except ImportError as e:
+    sys.stdout = _real_stdout
     print(json.dumps({"error": f"Import failed: {e}"}))
     sys.exit(1)
+
+# Restore stdout now that vnstock ads are done
+sys.stdout = _real_stdout
 
 
 def safe_get(row, key):
