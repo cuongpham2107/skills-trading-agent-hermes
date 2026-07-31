@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Data (chứa API keys, personal data)
+data/trading.db
+data/*.csv
+
+# Journal (personal analysis history)
+journal/*.md
+
+# Config (secrets)
+config/config.yaml
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cron logs
+cron/*.log

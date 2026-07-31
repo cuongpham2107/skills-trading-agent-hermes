@@ -1,0 +1,7 @@
+# VNStock AI — Python Dependencies
+# Install: /opt/homebrew/bin/python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+vnstock>=4.0
+pandas
+requests
+pyyaml

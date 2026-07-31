@@ -1,0 +1,22 @@
+# VNStock AI Configuration
+# Copy to config.yaml and fill in your keys
+
+# DNSE API
+dnse:
+  api_key: "your-dnse-api-key"
+  api_secret: "your-dnse-api-secret"
+  base_url: "https://dntc-api.dnse.com.vn"
+
+# vnstock (free tier — no key needed)
+vnstock:
+  rate_limit: 20  # requests per minute (free tier)
+
+# Portfolio
+portfolio:
+  db_path: "data/trading.db"
+  journal_path: "journal/"
+
+# Paths
+paths:
+  venv_python: ".venv/bin/python3"
+  scripts_dir: "scripts/"
