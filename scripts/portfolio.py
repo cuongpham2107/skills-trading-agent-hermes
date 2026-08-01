@@ -343,6 +343,66 @@ def cmd_stats(args):
     print("\n".join(lines))
     conn.close()
 
+def cmd_performance_report(args):
+    """B.9: Win rate by ticker/rating/timeframe from outcome_review."""
+    init_db()
+    conn = get_db()
+    
+    lines = ["PERFORMANCE REPORT", "=" * 40, ""]
+    
+    # Overall stats
+    total = conn.execute("SELECT COUNT(*) FROM analysis_log").fetchone()[0]
+    reviewed = conn.execute("SELECT COUNT(*) FROM outcome_review").fetchone()[0]
+    correct = conn.execute("SELECT COUNT(*) FROM outcome_review WHERE was_correct='yes'").fetchone()[0]
+    partial = conn.execute("SELECT COUNT(*) FROM outcome_review WHERE was_correct='partial'").fetchone()[0]
+    wrong = reviewed - correct - partial
+    
+    lines.append(f"Tong phan tich: {total} | Da review: {reviewed}")
+    if reviewed > 0:
+        acc = round(correct / reviewed * 100, 1)
+        lines.append(f"Win rate: {acc}% ({correct}/{reviewed})")
+        lines.append(f"  Dung: {correct} | Partial: {partial} | Sai: {wrong}")
+    else:
+        lines.append("Chua co review nao.")
+    lines.append("")
+    
+    # By ticker
+    rows = conn.execute("""
+        SELECT a.ticker, COUNT(*) as n, 
+               SUM(CASE WHEN o.was_correct='yes' THEN 1 ELSE 0 END) as correct,
+               SUM(CASE WHEN o.was_correct='partial' THEN 1 ELSE 0 END) as partial
+        FROM analysis_log a
+        JOIN outcome_review o ON o.analysis_id = a.id
+        GROUP BY a.ticker ORDER BY n DESC
+    """).fetchall()
+    
+    if rows:
+        lines.append("THEO MA CO PHIEU:")
+        lines.append(f"{'Ma':<6} {'Reviews':>7} {'Win%':>7} {'Correct':>7}")
+        for r in rows:
+            wr = round(r[2] / r[1] * 100, 1) if r[1] > 0 else 0
+            lines.append(f"{r[0]:<6} {r[1]:>7} {wr:>6.0f}% {r[2]:>7}")
+    
+    # By rating
+    rows = conn.execute("""
+        SELECT a.rating, COUNT(*) as n,
+               SUM(CASE WHEN o.was_correct='yes' THEN 1 ELSE 0 END) as correct
+        FROM analysis_log a
+        JOIN outcome_review o ON o.analysis_id = a.id
+        GROUP BY a.rating ORDER BY n DESC
+    """).fetchall()
+    
+    if rows:
+        lines.append("")
+        lines.append("THEO RATING:")
+        for r in rows:
+            wr = round(r[2] / r[1] * 100, 1) if r[1] > 0 else 0
+            lines.append(f"  {r[0]:<15} {r[1]:>4} reviews  {wr:>5.0f}% correct")
+    
+    print("\n".join(lines))
+    conn.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Portfolio Manager")
     sub = parser.add_subparsers(dest="command")
@@ -378,6 +438,7 @@ if __name__ == "__main__":
     p.add_argument("--ticker", required=True)
     p.add_argument("--days", type=int, required=True)
     sub.add_parser("stats")
+    sub.add_parser("performance_report")
 
     # -- import_symbols --
     p = sub.add_parser("import_symbols")
@@ -411,6 +472,7 @@ if __name__ == "__main__":
         "daily_check": cmd_daily_check,
         "review": cmd_review,
         "stats": cmd_stats,
+        "performance_report": cmd_performance_report,
         "import_symbols": cmd_import_symbols,
         "wishlist": cmd_wishlist,
         "wishlist_add": cmd_wishlist_add,

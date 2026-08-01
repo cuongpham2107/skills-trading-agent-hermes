@@ -106,6 +106,36 @@ def compute_all(lock_data):
     vol = volume_analysis(volumes, closes)
     
     cs = list(closes)
+    
+    # === B.3 Cross-check: compare TA trend vs actual 5D price action ===
+    cross_check_warnings = []
+    price_5d_change = round((cs[-1] - cs[-6]) / cs[-6] * 100, 1) if len(cs) >= 6 else None
+    
+    # Determine actual 5D trend from raw prices
+    if price_5d_change is not None:
+        rising_days = sum(1 for i in range(len(cs)-5, len(cs)) if cs[i] > cs[i-1])
+        if rising_days >= 4 and price_5d_change > 2:
+            actual_5d = "TĂNG"
+        elif rising_days <= 1 and price_5d_change < -2:
+            actual_5d = "GIẢM"
+        else:
+            actual_5d = "SIDEWAY"
+    else:
+        actual_5d = "unknown"
+    
+    # TA-based trend from SMA
+    ta_trend = "TĂNG" if current > sma20 else "GIẢM"
+    
+    # Flag divergence
+    if ta_trend == "TĂNG" and actual_5d == "GIẢM":
+        cross_check_warnings.append(
+            f"⚠️ DIVERGENCE: Technical trend='TĂNG' nhưng giá 5D thực tế {actual_5d} ({price_5d_change}%). Có thể false signal."
+        )
+    elif ta_trend == "GIẢM" and actual_5d == "TĂNG":
+        cross_check_warnings.append(
+            f"⚠️ DIVERGENCE: Technical trend='GIẢM' nhưng giá 5D thực tế {actual_5d} (+{price_5d_change}%). Có thể đang đảo chiều."
+        )
+    
     return {
         "generated_at": lock_data.get("meta", {}).get("generated_at", ""),
         "ticker": lock_data["meta"]["ticker"],
@@ -145,8 +175,15 @@ def compute_all(lock_data):
             "from_peak_65d": round((current - max(cs)) / max(cs) * 100, 1),
             "from_trough_65d": round((current - min(cs)) / min(cs) * 100, 1),
             "change_1d": round((cs[-1] - cs[-2]) / cs[-2] * 100, 1) if len(cs) >= 2 else None,
-            "change_5d": round((cs[-1] - cs[-6]) / cs[-6] * 100, 1) if len(cs) >= 6 else None,
+            "change_5d": price_5d_change,
             "change_20d": round((cs[-1] - cs[-21]) / cs[-21] * 100, 1) if len(cs) >= 21 else None,
+        },
+        "cross_check": {
+            "ta_trend": ta_trend,
+            "actual_5d_trend": actual_5d,
+            "price_5d_change_pct": price_5d_change,
+            "warnings": cross_check_warnings,
+            "has_divergence": len(cross_check_warnings) > 0,
         }
     }
 
