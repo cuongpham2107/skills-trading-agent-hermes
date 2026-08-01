@@ -1,6 +1,6 @@
 ---
 name: dnse-stock-analysis
-description: "Use when user asks to analyze/evaluate Vietnamese stocks. Fundamental-first 7-step pipeline: P/E, ROE, revenue → Investment Thesis. Portfolio tracking + journal."
+description: "Use when user asks to analyze/evaluate Vietnamese stocks. Fundamental-first 8-step pipeline: P/E, ROE, revenue → Investment Thesis. Portfolio tracking + journal."
 version: 3.2.0
 author: Hermes + Cuong
 platforms: [macos, linux]
@@ -23,7 +23,7 @@ metadata:
     tags: [finance, stock, vietnam, dnse, multi-agent, portfolio, journal, fundamental-first]
 ---
 
-# DNSE Stock Analysis Pipeline v3.1 — Fund Manager Style
+# DNSE Stock Analysis Pipeline v3.2 — Fund Manager Style
 
 ## 🚦 ĐÁNH GIÁ CÂU HỎI & RẼ NHÁNH (LÀM ĐẦU TIÊN)
 
@@ -33,7 +33,7 @@ Khi skill được load, **đánh giá intent của user trước**, sau đó r�
 User hỏi gì?
 │
 ├── "phân tích FPT" / "đánh giá FPT" / "FPT có nên mua không"
-│   └── Intent: PHÂN TÍCH 1 MÃ → Pipeline 7 bước (bên dưới)
+│   └── Intent: PHÂN TÍCH 1 MÃ → Pipeline 8 bước (bên dưới)
 │
 ├── "so sánh FPT với TCB" / "FPT hay TCB" / "nên mua mã nào"
 │   └── Intent: SO SÁNH → Fetch data từng mã → so sánh bảng
@@ -92,10 +92,11 @@ User hỏi gì?
 │   ├── dnse_fetch.py             # Fetch OHLC, quotes, secDef, NĐTNN từ DNSE API
 │   ├── fundamentals_fetch.py     # Fetch P/E, P/B, ROE, KQKD, company info từ vnstock
 │   ├── technical_compute.py      # Step 1b: Tính toán chỉ báo kỹ thuật (LLM chỉ diễn giải)
-│   ├── knowledge_query.py        # Step 3b: Tra cứu kiến thức vĩ mô/ngành (RAG nhẹ)
+│   ├── knowledge_ingest.py       # Chunk + TF-IDF index knowledge base (chạy 1 lần)
+│   ├── knowledge_query.py        # Semantic search kiến thức vĩ mô/ngành (TF-IDF)
 │   ├── screener.py               # Screening danh sách mã
 │   └── portfolio.py              # Quản lý SQLite portfolio + journal
-├── knowledge/                    # RAG knowledge base (mức nhẹ: front-matter + _index.md)
+├── knowledge/                    # RAG knowledge base (TF-IDF, index trong .index/)
 │   ├── _index.md                 # Mục lục + từ khóa → router
 │   ├── macro/                    # Kiến thức vĩ mô VN
 │   ├── sector-frameworks/        # Khung phân tích theo ngành
@@ -269,7 +270,7 @@ Inject vào prompt Portfolio Manager.
 
 ### Step 8: PORTFOLIO MANAGER — Investment Thesis + Hậu kiểm + LƯU
 
-Main agent tổng hợp TOÀN BỘ pipeline thành Investment Thesis (format giữ nguyên như v3.1).
+Main agent tổng hợp TOÀN BỘ pipeline thành Investment Thesis (format dưới đây).
 
 **Hậu kiểm (post-validation) bắt buộc trước khi hiển thị:**
 - Quét từng con số trong Investment Thesis
@@ -343,20 +344,6 @@ PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py review --ticker HPG --days 
 | Bán lẻ | 12-18 | 2-5 | >15% | GM >20% | <80% |
 | Điện/Nước | 12-18 | 1.5-3 | >10% | GM >25% | <100% |
 
-## PORTFOLIO TRACKING
-
-```bash
-PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py add_position --ticker HPG --buy-date 2026-07-30 --buy-price 24.8 --quantity 1000
-PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py close_position --ticker HPG --sell-date 2026-08-15 --sell-price 26.5
-PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py status
-```
-
-## LONG-TERM EVALUATION
-
-```bash
-PYTHONPATH="" .venv/bin/python3 scripts/portfolio.py review --ticker HPG --days 30
-```
-
 ## DAILY CRON JOB (Portfolio Check)
 
 Chạy 15:30 mỗi ngày T2-T6: fetch giá đóng cửa → tính P&L → báo cáo từng vị thế.
@@ -365,9 +352,9 @@ Chạy 15:30 mỗi ngày T2-T6: fetch giá đóng cửa → tính P&L → báo c
 
 ## Pitfalls
 
-- **data_lock.py**: Chạy TRƯỚC mọi thứ khác. Nếu `overall_data_quality = "none"` → DỪNG pipeline, báo user. KHÔNG được chạy phân tích nếu không có lock file.
-- **technical_compute.py**: Tất cả chỉ báo kỹ thuật (RSI, MACD, ATR, BB, support/resistance) do script này tính. LLM Technical Analyst CHỈ diễn giải — CẤM tự tính chỉ báo.
-- **knowledge_query.py (RAG nhẹ)**: Đọc `knowledge/_index.md` → match tags/keywords → trả về top-3 file liên quan. Nếu không có match → báo "Không có tài liệu tham khảo phù hợp". CẤM agent tự bịa kiến thức vĩ mô.
+- **data_lock.py**: Chạy TRƯỚC mọi thứ khác. Nếu `overall_data_quality = "none"` → DỪNG pipeline, báo user.
+- **technical_compute.py**: Tất cả chỉ báo kỹ thuật do script này tính. LLM Technical Analyst CHỈ diễn giải — CẤM tự tính.
+- **knowledge_query.py (TF-IDF RAG)**: Dùng sklearn TfidfVectorizer + cosine similarity. Cần chạy `knowledge_ingest.py` trước để build index. Nếu không có match → báo "Không có tài liệu tham khảo phù hợp". CẤM agent tự bịa kiến thức vĩ mô.
 - **Anti-hallucination**: Mọi số trong Investment Thesis phải trace được về Data Lock hoặc Technical Compute. Hậu kiểm sau Step 8: số nào không khớp → gắn cảnh báo.
 - **Rating constraints**: Nếu `fundamentals.data_status = "missing"` → rating tối đa HOLD. Nếu Fundamental tốt nhưng Technical xấu → tối đa HOLD.
 - **Hard-cap position size**: Tối đa 20%/mã. Không agent nào được đề xuất vượt quá.
@@ -383,11 +370,13 @@ Chạy 15:30 mỗi ngày T2-T6: fetch giá đóng cửa → tính P&L → báo c
 
 ## Verification Checklist
 
-- [x] `fundamentals_fetch.py FPT` → P/E=15.53, ROE=27.33%, Revenue=70,113 tỷ
-- [x] `fundamentals_fetch.py TCB` → P/E=12.16, ROE=14.22%, Profit=25,954 tỷ
-- [x] `fundamentals_fetch.py VIB` → P/E=7.97, ROE=17.34%, Profit=7,285 tỷ
+- [x] `data_lock.py FPT` → overall_data_quality=full, lock file created
+- [x] `technical_compute.py --ticker FPT` → RSI=39.4, MACD=-1.73, SMA20=67.6
+- [x] `knowledge_ingest.py` → 2 files, 8 chunks, TF-IDF index built
+- [x] `knowledge_query.py --ticker TCB` → banking.md (relevance=0.34)
 - [x] `dnse_fetch.py FPT` → closePrice=67.1, 65 days OHLC
+- [x] `fundamentals_fetch.py FPT` → P/E=15.53, ROE=27.33%, Revenue=70,113 tỷ
 - [x] `portfolio.py status` → hiển thị danh mục
 - [x] `portfolio.py log_analysis` → lưu analysis_log + journal
-- [ ] Pipeline đầy đủ cho 1 mã → Investment Thesis format mới (cần test thực tế)
+- [ ] Pipeline đầy đủ 1 mã → Investment Thesis (cần test thực tế)
 - [ ] Pipeline so sánh 2+ mã → bảng so sánh (cần test thực tế)
