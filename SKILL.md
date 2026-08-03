@@ -88,14 +88,15 @@ User hỏi gì?
 ~/.hermes/skills/finance/dnse-stock-analysis/
 ├── SKILL.md
 ├── scripts/
-│   ├── data_lock.py              # Step 1: Khóa dữ liệu đầu vào (DNSE + vnstock) + data_status
+│   ├── data_lock.py              # Step 0: Khóa dữ liệu đầu vào + data_status
 │   ├── dnse_fetch.py             # Fetch OHLC, quotes, secDef, NĐTNN từ DNSE API
-│   ├── fundamentals_fetch.py     # Fetch P/E, P/B, ROE, KQKD, company info từ vnstock
-│   ├── technical_compute.py      # Step 1b: Tính toán chỉ báo kỹ thuật (LLM chỉ diễn giải)
-│   ├── knowledge_ingest.py       # Chunk + TF-IDF index knowledge base (chạy 1 lần)
-│   ├── knowledge_query.py        # Semantic search kiến thức vĩ mô/ngành (TF-IDF)
+│   ├── fundamentals_fetch.py     # Fetch P/E, P/B, ROE, KQKD từ vnstock
+│   ├── fscore.py                 # Step 3a: Piotroski F-Score (0-9) — sức khỏe tài chính
+│   ├── technical_compute.py      # Step 1: Tính chỉ báo kỹ thuật (dùng ta library)
+│   ├── knowledge_ingest.py       # Chunk + TF-IDF index knowledge base
+│   ├── knowledge_query.py        # Semantic search vĩ mô/ngành (TF-IDF)
 │   ├── screener.py               # Screening danh sách mã
-│   └── portfolio.py              # Quản lý SQLite portfolio + journal
+│   └── portfolio.py              # SQLite portfolio + journal + performance_report
 ├── knowledge/                    # RAG knowledge base (TF-IDF, index trong .index/)
 │   ├── _index.md                 # Mục lục + từ khóa → router
 │   ├── macro/                    # Kiến thức vĩ mô VN
@@ -203,7 +204,14 @@ Output JSON: `{retailSentiment, institutionalSentiment, narrativeStrength, diver
 
 ### Step 3: FUNDAMENTAL + MACRO + VN-SPECIFIC (3 agents song song)
 
-**3a. Fundamental Analyst** — input: Data Lock fundamentals section. Trả JSON: `{growthAnalysis, qualityAnalysis, valuationAnalysis, redFlags[], overallScore, summary}`
+**3a. Fundamental Analyst** — input: Data Lock fundamentals section + F-Score. Trả JSON: `{growthAnalysis, qualityAnalysis, valuationAnalysis, redFlags[], overallScore, summary}`
+
+Trước khi chạy Fundamental Analyst, tính Piotroski F-Score:
+```bash
+PYTHONPATH="" .venv/bin/python3 scripts/fscore.py {TICKER}
+```
+
+F-Score (0-9) đo sức khỏe tài chính doanh nghiệp qua 3 nhóm: Profitability, Leverage/Liquidity, Operating Efficiency. Điểm 7+ = chất lượng cao. NGÂN HÀNG được miễn (dùng P/B, ROE thay thế).
 
 **3b. Macro Analyst với RAG** — trước khi chạy prompt, fetch kiến thức từ knowledge base:
 
@@ -352,8 +360,10 @@ Chạy 15:30 mỗi ngày T2-T6: fetch giá đóng cửa → tính P&L → báo c
 
 ## Pitfalls
 
+- **Subagent không được ghi file**: Subagents (delegate_task) chạy với cwd = `~/` (home directory) — nếu chúng ghi file sẽ làm rác home. LUẬT: mọi subagent CHỈ trả JSON qua final summary, TUYỆT ĐỐI không ghi file ra đĩa. Việc lưu DB/journal do main agent đảm nhiệm sau Step 8.
 - **data_lock.py**: Chạy TRƯỚC mọi thứ khác. Nếu `overall_data_quality = "none"` → DỪNG pipeline, báo user.
-- **technical_compute.py**: Tất cả chỉ báo kỹ thuật do script này tính. LLM Technical Analyst CHỈ diễn giải — CẤM tự tính.
+- **technical_compute.py**: Dùng `ta` library (130+ indicators, pure Python). LLM CHỈ diễn giải — CẤM tự tính. Cross-check: so sánh trend kỹ thuật với giá 5D thực tế, flag divergence.
+- **fscore.py**: Piotroski F-Score (0-9) đo sức khỏe tài chính. NGÂN HÀNG được miễn (dùng P/B, ROE thay thế).
 - **knowledge_query.py (TF-IDF RAG)**: Dùng sklearn TfidfVectorizer + cosine similarity. Cần chạy `knowledge_ingest.py` trước để build index. Nếu không có match → báo "Không có tài liệu tham khảo phù hợp". CẤM agent tự bịa kiến thức vĩ mô.
 - **Anti-hallucination**: Mọi số trong Investment Thesis phải trace được về Data Lock hoặc Technical Compute. Hậu kiểm sau Step 8: số nào không khớp → gắn cảnh báo.
 - **Rating constraints**: Nếu `fundamentals.data_status = "missing"` → rating tối đa HOLD. Nếu Fundamental tốt nhưng Technical xấu → tối đa HOLD.
@@ -375,7 +385,10 @@ Chạy 15:30 mỗi ngày T2-T6: fetch giá đóng cửa → tính P&L → báo c
 - [x] `knowledge_ingest.py` → 2 files, 8 chunks, TF-IDF index built
 - [x] `knowledge_query.py --ticker TCB` → banking.md (relevance=0.34)
 - [x] `dnse_fetch.py FPT` → closePrice=67.1, 65 days OHLC
-- [x] `fundamentals_fetch.py FPT` → P/E=15.53, ROE=27.33%, Revenue=70,113 tỷ
+- [x] `fscore.py FPT` → 8/9, "CAO — doanh nghiệp chất lượng tốt"
+- [x] `fscore.py TCB` → None (ngân hàng, miễn F-Score)
+- [x] `technical_compute.py` → dùng `ta` library, cross-check divergence
+- [x] `portfolio.py performance_report` → win rate by ticker/rating
 - [x] `portfolio.py status` → hiển thị danh mục
 - [x] `portfolio.py log_analysis` → lưu analysis_log + journal
 - [ ] Pipeline đầy đủ 1 mã → Investment Thesis (cần test thực tế)
